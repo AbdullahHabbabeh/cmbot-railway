@@ -1,42 +1,61 @@
-import os, logging
-from flask import Flask, request
-from telegram import Update
-from telegram.ext import Updater, Dispatcher
-
-# ---- Import your existing handlers ----
-from bot_handlers import *   
-
-# copy all your CMBotv05.py functions here #####################
-import logging
+#import logging
 import os
-from telegram import Update, ForceReply, ParseMode
+import json
+from flask import Flask, request
+from telegram import Update, ParseMode
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from telegram.utils.helpers import escape_markdown
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
 
-# Enable logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+
+
+
+
+# ---------- Environment ----------
 
 # --- Configuration ---
 # Bot Configuration - Updated for permanent use
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN','8378603838:AAHfhlrpZ8G6eNXk2l4HSxWbf85H4cIWp1k')
 CM_USER_ID = int(os.environ.get('CM_USER_ID', '135976546'))  # CM User ID
+PORT        = int(os.getenv("PORT", 8080))
+
+# ---------- Firebase ----------
+cred_json = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
+cred      = credentials.Certificate(cred_json)
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+# ---------- Helpers ----------
+def md(text: str) -> str:
+    return escape_markdown(str(text), version=2)
+
+def is_cm(user_id: int) -> bool:
+    return user_id == CM_USER_ID
+
+# ---------- Handlers ----------
+# Copy-paste **all** your handler functions here
+# start_command, menu_command, order_command, paid_command, etc.
+# …   (do not include the old main() at the end) …
+
+# Enable logging
+##logging.basicConfig(
+ ##   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
+##)
+##logger = logging.getLogger(__name__)
+
 
 # Menu Configuration - Cafeteria Man can modify this
 MENU = {
-    'coffee': {'name': 'Coffee', 'price': 2.50},
-    'tea': {'name': 'Tea', 'price': 2.00},
-    'sandwich': {'name': 'Sandwich', 'price': 5.00},
-    'burger': {'name': 'Burger', 'price': 8.00},
-    'pizza': {'name': 'Pizza Slice', 'price': 4.50},
-    'salad': {'name': 'Salad', 'price': 6.00},
-    'juice': {'name': 'Fresh Juice', 'price': 3.50},
-    'cake': {'name': 'Cake Slice', 'price': 4.00},
+    'coffee': {'name': 'Coffee', 'price': 25.00},
+    'tea': {'name': 'Tea', 'price': 12.00},
+    'sandwich': {'name': 'Sandwich', 'price': 15.00},
+    'burger': {'name': 'Burger', 'price': 28.00},
+    'pizza': {'name': 'Pizza Slice', 'price': 15.00},
+    'salad': {'name': 'Salad', 'price': 20.00},
+    'juice': {'name': 'Fresh Juice', 'price': 30.00},
+    'cake': {'name': 'Cake Slice', 'price': 15.00},
 }
 
 # Firestore Setup
@@ -959,7 +978,23 @@ def main() -> None:
     # Create the Updater and pass it your bot's token
     updater = Updater(TELEGRAM_BOT_TOKEN)
     
-    # Get the dispatcher to register handlers
+   
+    
+    # Start the Bot
+    # updater.start_polling()
+    #logger.info("Personal Cafeteria Bot started...")
+    # print(f"Bot is running! CM User ID: {CM_USER_ID}")
+    
+    # Run the bot until you press Ctrl-C
+    #updater.idle()
+
+
+
+# ---------- Flask / Railway ----------
+app = Flask(__name__)
+
+updater = Updater(TELEGRAM_BOT_TOKEN)
+ # Get the dispatcher to register handlers
     dispatcher = updater.dispatcher
     
     # Command handlers
@@ -979,32 +1014,7 @@ def main() -> None:
     
     # Error handler
     dispatcher.add_error_handler(error_handler)
-    
-    # Start the Bot
-    updater.start_polling()
-    logger.info("Personal Cafeteria Bot started...")
-    print(f"Bot is running! CM User ID: {CM_USER_ID}")
-    
-    # Run the bot until you press Ctrl-C
-    updater.idle()
 
-####if __name__ == '__main__':
-  ###  main()
-
-# CMBotv05.py functions END ###################
-app = Flask(__name__)
-
-# Railway injects PORT
-PORT = int(os.environ.get("PORT", 8080))
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-
-updater = Updater(TOKEN)
-dispatcher = updater.dispatcher
-
-# Register all your handlers exactly as before
-dispatcher.add_handler(CommandHandler("start", start_command))
-dispatcher.add_handler(CommandHandler("menu",  menu_command))
-# … add the rest …
 
 @app.route("/", methods=["POST"])
 def webhook():
@@ -1012,7 +1022,6 @@ def webhook():
     dispatcher.process_update(update)
     return "", 200
 
-# Railway runs: python main.py
 if __name__ == "__main__":
-    updater.bot.set_webhook(url=os.environ["RAILWAY_URL"])
+    updater.bot.set_webhook(f"{os.getenv('RAILWAY_URL')}/")
     app.run(host="0.0.0.0", port=PORT)

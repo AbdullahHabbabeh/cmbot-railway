@@ -31,33 +31,47 @@ MENU = {
 
 # Firestore Setup
 def initialize_firebase():
-    """Initialize Firebase with appropriate credentials."""
-    try:
-        # Check if Firebase app is already initialized
-        if not firebase_admin._apps:
-            app_id = os.environ.get('__app_id', 'default-app-id')
-            firebase_config_str = os.environ.get('__firebase_config')
+  import json
+import io
 
-            if firebase_config_str:
-                cred = credentials.ApplicationDefault()
-                firebase_admin.initialize_app(cred, {
-                    'projectId': app_id,
-                })
-                logging.info(f"Firebase initialized for project ID: {app_id} (Canvas environment)")
-            else:
-                cred_path = 'serviceAccountKey.json'
-                if os.path.exists(cred_path):
-                    cred = credentials.Certificate(cred_path)
-                    firebase_admin.initialize_app(cred)
-                    logging.info("Firebase initialized with service account key (local environment).")
-                else:
-                    logging.error(f"Service account key not found at {cred_path}. Firestore will not work.")
-                    raise FileNotFoundError(f"Service account key not found at {cred_path}")
+def initialize_firebase():
+    """Initialize Firebase from the JSON stored in GOOGLE_APPLICATION_CREDENTIALS_JSON."""
+    try:
+        if firebase_admin._apps:
+            logging.info("Firebase already initialized, skipping.")
+            return
+
+        # 1) Try Railway / Canvas env-var first
+        cred_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        if cred_json:
+            service_info = json.loads(cred_json)
+            cred = credentials.Certificate(service_info)
+            project_id = service_info.get("project_id", "default-app-id")
+            firebase_admin.initialize_app(cred, {"projectId": project_id})
+            logging.info("Firebase initialized from GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            return
+
+        # 2) Fallback to ApplicationDefault (Cloud Run / Cloud Functions)
+        if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or os.environ.get("K_SERVICE"):
+            cred = credentials.ApplicationDefault()
+            project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "default-app-id")
+            firebase_admin.initialize_app(cred, {"projectId": project_id})
+            logging.info("Firebase initialized with ApplicationDefault")
+            return
+
+        # 3) Final fallback to local serviceAccountKey.json
+        cred_path = "serviceAccountKey.json"
+        if os.path.exists(cred_path):
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
+            logging.info("Firebase initialized with local serviceAccountKey.json")
         else:
-            logging.info("Firebase app already initialized, skipping initialization.")
+            raise FileNotFoundError(
+                "Firebase credentials not found in env-var nor in serviceAccountKey.json"
+            )
 
     except Exception as e:
-        logging.error(f"Error initializing Firebase: {e}")
+        logging.error("Error initializing Firebase: %s", e)
         raise
 
 # Initialize Firebase once at module level

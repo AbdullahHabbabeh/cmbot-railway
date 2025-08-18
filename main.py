@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Initialize Firebase and bot at module level
+initialize_firebase()
+
 # Global variable to store the updater
 updater = None
 
@@ -29,11 +32,20 @@ def setup_bot():
     
     return updater
 
+# Initialize bot immediately
+if TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_TOKEN != 'YOUR_TELEGRAM_BOT_TOKEN':
+    setup_bot()
+    logger.info("Bot setup completed at module level")
+
 # Define webhook route OUTSIDE of main function
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Handle incoming webhook from Telegram."""
     try:
+        if updater is None:
+            logger.error("Updater not initialized")
+            return 'Bot not initialized', 500
+            
         update = Update.de_json(request.get_json(force=True), updater.bot)
         updater.dispatcher.process_update(update)
         logger.info("Webhook processed successfully")
@@ -46,10 +58,15 @@ def webhook():
 @app.route('/', methods=['GET'])
 def health_check():
     """Health check endpoint."""
+    if updater is None:
+        return "Bot not initialized", 500
     return "Cafeteria Bot is running! 🤖", 200
+
 
 def main():
     """Main function to start the bot with webhook for Railway."""
+    global updater
+    
     if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN':
         logger.error("Bot token is not set properly. Please check TELEGRAM_BOT_TOKEN.")
         return
@@ -58,10 +75,9 @@ def main():
         logger.error("CM User ID is not set properly. Please check CM_USER_ID.")
         return
     
-    initialize_firebase()
-    
-    # Setup bot globally
-    setup_bot()
+    # Setup bot if not already done
+    if updater is None:
+        setup_bot()
     
     # Get the PORT environment variable set by Railway
     port = int(os.environ.get('PORT', 8080))

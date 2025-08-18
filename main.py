@@ -13,8 +13,12 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Global variable to store the updater
+updater = None
+
 def setup_bot():
     """Set up the Telegram bot with webhook."""
+    global updater
     updater = Updater(TELEGRAM_BOT_TOKEN, use_context=True)
     dispatcher = updater.dispatcher
 
@@ -24,6 +28,25 @@ def setup_bot():
     dispatcher.add_error_handler(error_handler)
     
     return updater
+
+# Define webhook route OUTSIDE of main function
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Handle incoming webhook from Telegram."""
+    try:
+        update = Update.de_json(request.get_json(force=True), updater.bot)
+        updater.dispatcher.process_update(update)
+        logger.info("Webhook processed successfully")
+        return '', 200
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        return '', 500
+
+# Add a health check route
+@app.route('/', methods=['GET'])
+def health_check():
+    """Health check endpoint."""
+    return "Cafeteria Bot is running! 🤖", 200
 
 def main():
     """Main function to start the bot with webhook for Railway."""
@@ -37,7 +60,8 @@ def main():
     
     initialize_firebase()
     
-    updater = setup_bot()
+    # Setup bot globally
+    setup_bot()
     
     # Get the PORT environment variable set by Railway
     port = int(os.environ.get('PORT', 8080))
@@ -49,15 +73,9 @@ def main():
     updater.bot.set_webhook(webhook_url)
     logger.info(f"Webhook set to {webhook_url}")
     
-    @app.route('/webhook', methods=['POST'])
-    def webhook():
-        update = Update.de_json(request.get_json(force=True), updater.bot)
-        updater.dispatcher.process_update(update)
-        return '', 200
-    
     # Start Flask server
-    app.run(host='0.0.0.0', port=port)
-    logger.info("Personal Cafeteria Bot started on Railway...")
+    logger.info("Starting Cafeteria Bot on Railway...")
+    app.run(host='0.0.0.0', port=port, debug=False)
 
 if __name__ == '__main__':
     main()

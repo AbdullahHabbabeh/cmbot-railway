@@ -1,4 +1,4 @@
-python-telegram-bot==13.15
-firebase-admin==6.3.0
+python-telegram-bot==20.8
 Flask==2.3.3
 gunicorn==21.2.0
+firebase-admin==6.3.0

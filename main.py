@@ -1,210 +1,155 @@
-#import logging
 import os
 import json
+import logging
 from flask import Flask, request
 from telegram import Update, ParseMode
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram.ext import Updater, CommandHandler, Dispatcher, CallbackContext
 from telegram.utils.helpers import escape_markdown
 import firebase_admin
 from firebase_admin import credentials, firestore
+from google.cloud.exceptions import NotFound, FirebaseError
+from telegram.error import TelegramError, BadRequest, Unauthorized
 from datetime import datetime
 
-
-
-
+# ---------- Logging ----------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ---------- Environment ----------
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CM_USER_ID = int(os.getenv("CM_USER_ID", 0))
+PORT = int(os.getenv("PORT", 8080))
+RAILWAY_URL = os.getenv("RAILWAY_URL")
 
-# --- Configuration ---
-# Bot Configuration - Updated for permanent use
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN','8378603838:AAHfhlrpZ8G6eNXk2l4HSxWbf85H4cIWp1k')
-CM_USER_ID = int(os.environ.get('CM_USER_ID', '135976546'))  # CM User ID
-PORT        = int(os.getenv("PORT", 8080))
+# Validate environment variables
+if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN':
+    logger.error("Bot token is not set properly. Please check TELEGRAM_BOT_TOKEN.")
+    raise ValueError("TELEGRAM_BOT_TOKEN is required.")
+
+if CM_USER_ID == 0:
+    logger.error("CM User ID is not set properly. Please check CM_USER_ID.")
+    raise ValueError("CM_USER_ID is required.")
+
+if not RAILWAY_URL:
+    logger.error("RAILWAY_URL is not set.")
+    raise ValueError("RAILWAY_URL environment variable is required.")
+
+cred_json_str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+if not cred_json_str:
+    logger.error("GOOGLE_APPLICATION_CREDENTIALS_JSON is not set.")
+    raise ValueError("GOOGLE_APPLICATION_CREDENTIALS_JSON is required.")
+try:
+    cred_json = json.loads(cred_json_str)
+except json.JSONDecodeError as e:
+    logger.error(f"Invalid GOOGLE_APPLICATION_CREDENTIALS_JSON format: {e}")
+    raise
 
 # ---------- Firebase ----------
-cred_json = json.loads(os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON"))
-cred      = credentials.Certificate(cred_json)
-firebase_admin.initialize_app(cred)
+try:
+    firebase_admin.initialize_app(credentials.Certificate(cred_json))
+except ValueError as e:
+    logger.error(f"Firebase initialization failed: {e}")
+    raise
 db = firestore.client()
 
 # ---------- Helpers ----------
 def md(text: str) -> str:
     return escape_markdown(str(text), version=2)
 
-def is_cm(user_id: int) -> bool:
-    return user_id == CM_USER_ID
-
-# ---------- Handlers ----------
-# Copy-paste **all** your handler functions here
-# start_command, menu_command, order_command, paid_command, etc.
-# …   (do not include the old main() at the end) …
-
-# Enable logging
-##logging.basicConfig(
- ##   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
-##)
-##logger = logging.getLogger(__name__)
-
-
-# Menu Configuration - Cafeteria Man can modify this
-MENU = {
-    'coffee': {'name': 'Coffee', 'price': 25.00},
-    'tea': {'name': 'Tea', 'price': 12.00},
-    'sandwich': {'name': 'Sandwich', 'price': 15.00},
-    'burger': {'name': 'Burger', 'price': 28.00},
-    'pizza': {'name': 'Pizza Slice', 'price': 15.00},
-    'salad': {'name': 'Salad', 'price': 20.00},
-    'juice': {'name': 'Fresh Juice', 'price': 30.00},
-    'cake': {'name': 'Cake Slice', 'price': 15.00},
-}
-
-# Firestore Setup
-try:
-    # Try to get Firebase config from environment variables (for Canvas environment)
-    app_id = os.environ.get('__app_id', 'default-app-id')
-    firebase_config_str = os.environ.get('__firebase_config')
-
-    if firebase_config_str:
-        # In Canvas environment, __firebase_config is a JSON string
-        cred = credentials.ApplicationDefault()
-        firebase_admin.initialize_app(cred, {
-            'projectId': app_id,
-        })
-        logging.info(f"Firebase initialized for project ID: {app_id} (Canvas environment)")
-    else:
-        # Local development: Use a service account key
-        cred_path = 'serviceAccountKey.json'  # REPLACE WITH YOUR ACTUAL PATH
-        if os.path.exists(cred_path):
-            cred = credentials.Certificate(cred_path)
-            firebase_admin.initialize_app(cred)
-            logging.info("Firebase initialized with service account key (local environment).")
-        else:
-            logging.error(f"Service account key not found at {cred_path}. Firestore will not work.")
-
-except Exception as e:
-    logging.error(f"Error initializing Firebase: {e}")
-
-db = firestore.client()
-
-# --- Helper Functions ---
-def md(text: str) -> str:
-    """Escape MarkdownV2 special characters."""
-    return escape_markdown(str(text), version=2)
-
-def get_pending_payments_ref():
-    """Returns a Firestore reference to pending payments collection."""
-    return db.collection('pending_payments')
+def is_cm(uid: int) -> bool:
+    return uid == CM_USER_ID
 
 def get_user_display_name(user):
-    """Gets a display name for the user (username or first_name)."""
-    if user.username:
-        return f"@{user.username}"
-    return user.first_name
+    return f"@{user.username}" if user.username else user.first_name
 
 def get_client_ref(user_id):
-    """Returns a Firestore reference to a specific client's data."""
     return db.collection('cafeteria_clients').document(str(user_id))
 
-def is_cm(user_id) -> bool:
-    """Checks if the user is the Cafeteria Man (bot owner)."""
-    return user_id == CM_USER_ID
+def get_pending_payments_ref():
+    return db.collection('pending_payments')
 
-def notify_cm(context: CallbackContext, message: str, parse_mode=ParseMode.MARKDOWN_V2):
-    """Helper function to notify CM with error handling."""
+def notify_cm(context, message, parse_mode=ParseMode.MARKDOWN_V2):
     if not CM_USER_ID:
-        logger.warning("CM_USER_ID not set, cannot send notification")
-        return False
-    
+        logger.warning("CM_USER_ID not set")
+        return
     try:
         context.bot.send_message(
             chat_id=CM_USER_ID,
             text=md(message) if parse_mode == ParseMode.MARKDOWN_V2 else message,
             parse_mode=parse_mode
         )
-        logger.info("CM notification sent successfully")
-        return True
     except Exception as e:
         logger.error(f"Failed to notify CM: {e}")
-        return False
 
-# --- Command Handlers ---
-def start_command(update: Update, context: CallbackContext) -> None:
-    """Sends a welcome message when the /start command is issued."""
+# ---------- Menu ----------
+MENU = {
+    'coffee':   {'name': 'Coffee',       'price': 2.50},
+    'tea':      {'name': 'Tea',          'price': 2.00},
+    'sandwich': {'name': 'Sandwich',     'price': 5.00},
+    'burger':   {'name': 'Burger',       'price': 8.00},
+    'pizza':    {'name': 'Pizza Slice',  'price': 4.50},
+    'salad':    {'name': 'Salad',        'price': 6.00},
+    'juice':    {'name': 'Fresh Juice',  'price': 3.50},
+    'cake':     {'name': 'Cake Slice',   'price': 4.00},
+}
+
+# ---------- Handlers ----------
+def start_command(update: Update, context: CallbackContext):
     user = update.effective_user
-    user_id = user.id
-    
-    if is_cm(user_id):
-        welcome_msg = (
-            f"Welcome back, Cafeteria Manager! 👨‍🍳\n\n"
-            f"You can use:\n"
-            f"/menu - View/manage menu items\n"
-            f"/received - Confirm payment received\n"
-            f"/balance <user_id> - Check any client's balance\n"
-            f"/summary <user_id> - View client's order history\n"
-            f"/pending - View pending payments\n"
-            f"/help - Show all commands"
-        )
+    if is_cm(user.id):
+        text = ("Welcome back, Cafeteria Manager! 👨‍🍳\n\n"
+                "/menu - View menu\n/orders - Recent orders\n/clients - All clients\n"
+                "/received - Confirm payments\n/help - Full list")
     else:
-        welcome_msg = (
-            f"Hi {user.first_name}! 🍽️\n\n"
-            f"Welcome to the Cafeteria Bot. You can:\n"
-            f"/menu - View available items\n"
-            f"/order - Place your food order\n"
-            f"/paid - Report when you've made a payment\n"
-            f"/balance - Check your current balance\n"
-            f"/summary - View your order history\n"
-            f"/help - Show all commands"
-        )
-    
-    update.message.reply_text(welcome_msg)
+        text = (f"Hi {md(user.first_name)}! 🍽️\n\n"
+                "/menu - View items\n/order - Place order\n/paid - Report payment\n"
+                "/balance - Check balance\n/help - More info")
+    update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)
 
-def menu_command(update: Update, context: CallbackContext) -> None:
-    """Shows the menu with available items and prices."""
-    user_id = update.message.from_user.id
-    
-    menu_text = "🍽️ **CAFETERIA MENU** 🍽️\n\n"
-    
-    for key, item in MENU.items():
-        menu_text += f"**{item['name']}** - ${item['price']:.2f}\n"
-        menu_text += f"  _Order with: /order {key} <quantity>_\n\n"
-    
-    menu_text += "💡 **How to order:** `/order <item_code> <quantity>`\n"
-    menu_text += "📝 **Example:** `/order coffee 2` (for 2 coffees)"
-    
-    update.message.reply_text(menu_text, parse_mode=ParseMode.MARKDOWN)
+def menu_command(update: Update, context: CallbackContext):
+    lines = ["🍽️ **CAFETERIA MENU** 🍽️\n"]
+    for k, v in MENU.items():
+        lines.append(f"**{md(v['name'])}** - ${v['price']:.2f}")
+    update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN_V2)
 
-def order_command(update: Update, context: CallbackContext) -> None:
+def order_command(update: Update, context: CallbackContext):
     """Allows a client to place an order. Format: /order <item_code> <quantity>"""
     user_id = update.message.from_user.id
     user_name = get_user_display_name(update.message.from_user)
     
     if is_cm(user_id):
-        update.message.reply_text("As the Cafeteria Manager, you don't need to place orders! 😄")
+        update.message.reply_text("As the Cafeteria Manager, you don't need to place orders! 😄", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     if not context.args or len(context.args) < 2:
         update.message.reply_text(
             "Usage: /order <item_code> <quantity>\n"
             "Example: /order coffee 2\n\n"
-            "Use /menu to see available items and their codes."
+            "Use /menu to see available items and their codes.",
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         return
     
     try:
-        item_code = context.args[0].lower()
+        item_code = context.args[0].lower().strip()
+        if not item_code.isalnum():  # Basic sanitization
+            update.message.reply_text("Invalid item code. Use only alphanumeric characters.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
+        
         quantity = int(context.args[1])
         
         if item_code not in MENU:
             available_items = ", ".join(MENU.keys())
             update.message.reply_text(
-                f"Item '{item_code}' not found in menu.\n"
-                f"Available items: {available_items}\n\n"
-                f"Use /menu to see the full menu."
+                f"Item '{md(item_code)}' not found in menu.\n"
+                f"Available items: {md(available_items)}\n\n"
+                f"Use /menu to see the full menu.",
+                parse_mode=ParseMode.MARKDOWN_V2
             )
             return
         
         if quantity <= 0:
-            update.message.reply_text("Quantity must be a positive number.")
+            update.message.reply_text("Quantity must be a positive number.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
         item = MENU[item_code]
@@ -223,61 +168,68 @@ def order_command(update: Update, context: CallbackContext) -> None:
         }
         
         client_ref = get_client_ref(user_id)
-        client_ref.collection('orders').add(order_data)
-        
-        # Also store user info for CM reference
-        client_ref.set({
-            'user_name': user_name,
-            'user_id': user_id,
-            'last_order': firestore.SERVER_TIMESTAMP
-        }, merge=True)
+        try:
+            client_ref.collection('orders').add(order_data)
+            client_ref.set({
+                'user_name': user_name,
+                'user_id': user_id,
+                'last_order': firestore.SERVER_TIMESTAMP
+            }, merge=True)
+        except NotFound:
+            logger.error(f"Firestore document not found for user_id: {user_id}")
+            update.message.reply_text("Error: User data not found in the database.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
+        except FirebaseError as e:
+            logger.error(f"Firestore error: {e}")
+            update.message.reply_text("Error communicating with the database. Please try again later.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
         
         update.message.reply_text(
             f"✅ Order placed successfully!\n\n"
-            f"**{quantity} x {item['name']}** @ ${item['price']:.2f} each\n"
+            f"**{quantity} x {md(item['name'])}** @ ${item['price']:.2f} each\n"
             f"**Total: ${total_price:.2f}**\n\n"
-            f"Your order has been sent to the cafeteria. 🍽️"
+            f"Your order has been sent to the cafeteria. 🍽️",
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         
-        # Notify CM about new order
         notify_cm(
             context,
             f"🆕 **NEW ORDER**\n\n"
             f"👤 **From:** {md(user_name)}\n"
             f"🍽️ **Order:** {quantity} x {md(item['name'])}\n"
             f"💰 **Total:** ${total_price:.2f}\n\n"
-            f"_Use /orders to see all recent orders_"
+            f"_Use /orders to see all recent orders_",
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         
         logger.info(f"Order recorded for {user_name}: {order_data}")
         
     except ValueError:
-        update.message.reply_text("Invalid quantity. Please use a number.\nExample: /order coffee 2")
+        update.message.reply_text("Invalid quantity. Please use a number.\nExample: /order coffee 2", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         logger.error(f"Error processing order command: {e}")
-        update.message.reply_text("Sorry, there was an error processing your order. Please try again.")
+        update.message.reply_text("Sorry, there was an error processing your order. Please try again.", parse_mode=ParseMode.MARKDOWN_V2)
 
-def paid_command(update: Update, context: CallbackContext) -> None:
+def paid_command(update: Update, context: CallbackContext):
     """Client reports they have made a payment. Format: /paid <amount>"""
     user_id = update.message.from_user.id
     user_name = get_user_display_name(update.message.from_user)
     
     if is_cm(user_id):
-        update.message.reply_text("Use /received to confirm payments from clients.")
+        update.message.reply_text("Use /received to confirm payments from clients.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     if not context.args:
-        update.message.reply_text("Usage: /paid <amount>\nExample: /paid 15.50")
+        update.message.reply_text("Usage: /paid <amount>\nExample: /paid 15.50", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
         amount = float(context.args[0])
         
         if amount <= 0:
-            update.message.reply_text("Payment amount must be positive.")
+            update.message.reply_text("Payment amount must be positive.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
-        # Add to pending payments for CM to confirm
         pending_data = {
             'user_id': user_id,
             'user_name': user_name,
@@ -286,41 +238,46 @@ def paid_command(update: Update, context: CallbackContext) -> None:
             'status': 'pending_confirmation'
         }
         
-        pending_ref = get_pending_payments_ref().add(pending_data)
+        try:
+            get_pending_payments_ref().add(pending_data)
+        except FirebaseError as e:
+            logger.error(f"Firestore error adding pending payment: {e}")
+            update.message.reply_text("Error communicating with the database. Please try again later.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
         
         update.message.reply_text(
             f"💰 Payment reported: ${amount:.2f}\n\n"
             f"Your payment is pending confirmation from the cafeteria manager. "
-            f"You'll be notified once it's confirmed. ⏳"
+            f"You'll be notified once it's confirmed. ⏳",
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         
-        # Notify CM about payment claim
         notify_cm(
             context,
             f"💰 **PAYMENT REPORTED**\n\n"
             f"👤 **From:** {md(user_name)}\n"
             f"💵 **Amount:** ${amount:.2f}\n\n"
-            f"_Use /received to confirm this payment_"
+            f"_Use /received to confirm this payment_",
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         
         logger.info(f"Payment reported by {user_name}: ${amount:.2f}")
         
     except ValueError:
-        update.message.reply_text("Invalid amount. Please use a number.\nExample: /paid 15.50")
+        update.message.reply_text("Invalid amount. Please use a number.\nExample: /paid 15.50", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         logger.error(f"Error processing paid command: {e}")
-        update.message.reply_text("Sorry, there was an error reporting your payment. Please try again.")
+        update.message.reply_text("Sorry, there was an error reporting your payment. Please try again.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def orders_command(update: Update, context: CallbackContext) -> None:
-    """CM views recent orders from all clients - UPDATED WITH ERROR HANDLING."""
+    """CM views recent orders from all clients."""
     user_id = update.message.from_user.id
     
     if not is_cm(user_id):
-        update.message.reply_text("Only the cafeteria manager can view all orders.")
+        update.message.reply_text("Only the cafeteria manager can view all orders.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
-        # Get all clients with error handling for corrupted documents
         clients_collection = db.collection('cafeteria_clients')
         clients = []
         
@@ -328,18 +285,18 @@ def orders_command(update: Update, context: CallbackContext) -> None:
             for client_doc in clients_collection.stream():
                 try:
                     client_data = client_doc.to_dict()
-                    if client_data:  # Only add if data exists
+                    if client_data:
                         clients.append((client_doc.id, client_data))
                 except Exception as e:
                     logger.warning(f"Skipping corrupted client document {client_doc.id}: {e}")
                     continue
-        except Exception as e:
+        except FirebaseError as e:
             logger.error(f"Error streaming clients collection: {e}")
-            update.message.reply_text("Error accessing client data. Please try again later.")
+            update.message.reply_text("Error accessing client data. Please try again later.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
         if not clients:
-            update.message.reply_text("No clients found yet.")
+            update.message.reply_text("No clients found yet.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
         message = "📋 **RECENT ORDERS** 📋\n\n"
@@ -349,11 +306,8 @@ def orders_command(update: Update, context: CallbackContext) -> None:
             try:
                 user_id_from_data = client_data.get('user_id')
                 client_name = client_data.get('user_name', f'User {user_id_from_data or client_id}')
-                
-                # Use the actual user_id from the data, fallback to document ID
                 actual_client_id = user_id_from_data or client_id
                 
-                # Get recent orders for this client with error handling
                 try:
                     client_ref = get_client_ref(actual_client_id)
                     orders_query = client_ref.collection('orders').limit(5)
@@ -362,15 +316,14 @@ def orders_command(update: Update, context: CallbackContext) -> None:
                     for order_doc in orders:
                         try:
                             order = order_doc.to_dict()
-                            if order:  # Check if order data exists
+                            if order:
                                 order['client_name'] = client_name
                                 order['client_id'] = actual_client_id
                                 all_orders.append(order)
                         except Exception as e:
                             logger.warning(f"Skipping corrupted order for client {client_name}: {e}")
                             continue
-                            
-                except Exception as e:
+                except FirebaseError as e:
                     logger.warning(f"Error getting orders for client {client_name}: {e}")
                     continue
                     
@@ -379,16 +332,14 @@ def orders_command(update: Update, context: CallbackContext) -> None:
                 continue
         
         if not all_orders:
-            update.message.reply_text("No orders found.")
+            update.message.reply_text("No orders found.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
-        # Sort all orders by timestamp in Python (most recent first)
         try:
             all_orders.sort(key=lambda x: x.get('timestamp', datetime.min), reverse=True)
         except Exception as e:
             logger.warning(f"Error sorting orders: {e}")
         
-        # Show latest 20 orders
         order_count = 0
         for order in all_orders[:20]:
             try:
@@ -408,71 +359,67 @@ def orders_command(update: Update, context: CallbackContext) -> None:
                 continue
         
         if order_count == 0:
-            update.message.reply_text("No valid orders found.")
+            update.message.reply_text("No valid orders found.", parse_mode=ParseMode.MARKDOWN_V2)
             return
             
         if len(all_orders) > 20:
             message += f"... and {len(all_orders) - 20} more orders"
         
-        # Split long messages
         if len(message) > 4000:
             message = message[:4000] + "\n... (truncated)"
         
-        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
         
     except Exception as e:
         logger.error(f"Error getting orders: {e}")
-        update.message.reply_text("Error retrieving orders. Please try again later.")
+        update.message.reply_text("Error retrieving orders. Please try again later.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def test_notification_command(update: Update, context: CallbackContext) -> None:
     """Test command for CM to verify notifications work."""
     user_id = update.message.from_user.id
     
     if not is_cm(user_id):
-        update.message.reply_text("Only the cafeteria manager can test notifications.")
+        update.message.reply_text("Only the cafeteria manager can test notifications.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
         context.bot.send_message(
             chat_id=CM_USER_ID,
             text="✅ **NOTIFICATION TEST**\n\nIf you see this message, notifications are working correctly!",
-            parse_mode=ParseMode.MARKDOWN
+            parse_mode=ParseMode.MARKDOWN_V2
         )
-        update.message.reply_text("Test notification sent! Check if you received it.")
+        update.message.reply_text("Test notification sent! Check if you received it.", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         logger.error(f"Test notification failed: {e}")
-        update.message.reply_text(f"❌ Notification test failed: {e}")
+        update.message.reply_text(f"❌ Notification test failed: {e}", parse_mode=ParseMode.MARKDOWN_V2)
 
 def pending_command(update: Update, context: CallbackContext) -> None:
     """CM views all pending payments."""
     user_id = update.message.from_user.id
     
     if not is_cm(user_id):
-        update.message.reply_text("Only the cafeteria manager can view pending payments.")
+        update.message.reply_text("Only the cafeteria manager can view pending payments.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
-        # Simplified query - remove order_by to avoid index requirement
         pending_payments = list(get_pending_payments_ref()
                               .where('status', '==', 'pending_confirmation')
                               .stream())
         
         if not pending_payments:
-            update.message.reply_text("✅ No pending payments!")
+            update.message.reply_text("✅ No pending payments!", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
-        # Sort in Python instead of Firestore to avoid index requirement
         pending_list = []
         for doc in pending_payments:
             try:
                 payment = doc.to_dict()
-                if payment:  # Check if payment data exists
+                if payment:
                     pending_list.append(payment)
             except Exception as e:
                 logger.warning(f"Skipping corrupted payment document: {e}")
                 continue
         
-        # Sort by timestamp in Python
         pending_list.sort(key=lambda x: x.get('timestamp', datetime.min))
         
         message = "💰 **PENDING PAYMENTS** 💰\n\n"
@@ -490,22 +437,21 @@ def pending_command(update: Update, context: CallbackContext) -> None:
         message += f"\n**Total Pending: ${total_pending:.2f}**\n\n"
         message += f"Use `/received <number>` to confirm payments"
         
-        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
         
-    except Exception as e:
+    except FirebaseError as e:
         logger.error(f"Error getting pending payments: {e}")
-        update.message.reply_text("Error retrieving pending payments. Please try again later.")
+        update.message.reply_text("Error retrieving pending payments. Please try again later.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def clients_command(update: Update, context: CallbackContext) -> None:
     """CM views all clients and their balances."""
     user_id = update.message.from_user.id
     
     if not is_cm(user_id):
-        update.message.reply_text("Only the cafeteria manager can view all clients.")
+        update.message.reply_text("Only the cafeteria manager can view all clients.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
-        # Get all clients with error handling for corrupted documents
         clients_collection = db.collection('cafeteria_clients')
         clients = []
         
@@ -513,18 +459,18 @@ def clients_command(update: Update, context: CallbackContext) -> None:
             for client_doc in clients_collection.stream():
                 try:
                     client_data = client_doc.to_dict()
-                    if client_data:  # Only add if data exists
+                    if client_data:
                         clients.append((client_doc.id, client_data))
                 except Exception as e:
                     logger.warning(f"Skipping corrupted client document {client_doc.id}: {e}")
                     continue
-        except Exception as e:
+        except FirebaseError as e:
             logger.error(f"Error streaming clients collection: {e}")
-            update.message.reply_text("Error accessing client data. Please try again later.")
+            update.message.reply_text("Error accessing client data. Please try again later.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
         if not clients:
-            update.message.reply_text("No clients found yet.")
+            update.message.reply_text("No clients found yet.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
         message = "👥 **ALL CLIENTS** 👥\n\n"
@@ -535,97 +481,83 @@ def clients_command(update: Update, context: CallbackContext) -> None:
             try:
                 user_id_from_data = client_data.get('user_id')
                 client_name = client_data.get('user_name', f'User {user_id_from_data or client_id}')
-                
-                # Use the actual user_id from the data, fallback to document ID
                 actual_client_id = user_id_from_data or client_id
                 
-                # Calculate balance for this client with error handling
+                client_ref = get_client_ref(actual_client_id)
+                
+                total_ordered = 0
                 try:
-                    client_ref = get_client_ref(actual_client_id)
-                    
-                    # Get orders with error handling
-                    total_ordered = 0
-                    try:
-                        orders = list(client_ref.collection('orders').stream())
-                        for order_doc in orders:
-                            try:
-                                order_data = order_doc.to_dict()
-                                if order_data:
-                                    total_ordered += order_data.get('total_price', 0)
-                            except Exception as e:
-                                logger.warning(f"Skipping corrupted order for client {client_name}: {e}")
-                                continue
-                    except Exception as e:
-                        logger.warning(f"Error getting orders for client {client_name}: {e}")
-                    
-                    # Get payments with error handling
-                    total_paid = 0
-                    try:
-                        payments = list(client_ref.collection('payments').stream())
-                        for payment_doc in payments:
-                            try:
-                                payment_data = payment_doc.to_dict()
-                                if payment_data:
-                                    total_paid += payment_data.get('amount', 0)
-                            except Exception as e:
-                                logger.warning(f"Skipping corrupted payment for client {client_name}: {e}")
-                                continue
-                    except Exception as e:
-                        logger.warning(f"Error getting payments for client {client_name}: {e}")
-                    
-                    balance = total_ordered - total_paid
-                    
-                    if balance > 0:
-                        status = f"💳 ${balance:.2f}"
-                        total_due += balance
-                    elif balance < 0:
-                        status = f"💰 ${abs(balance):.2f} credit"
-                    else:
-                        status = "✅ Paid"
-                    
-                    message += f"**{md(client_name)}** (ID: {actual_client_id})\n{status}\n\n"
-                    processed_clients += 1
-                    
-                except Exception as e:
-                    logger.warning(f"Error processing client {client_name}: {e}")
-                    message += f"**{md(client_name)}** - Error calculating balance\n\n"
-                    continue
+                    orders = list(client_ref.collection('orders').stream())
+                    for order_doc in orders:
+                        try:
+                            order_data = order_doc.to_dict()
+                            if order_data:
+                                total_ordered += order_data.get('total_price', 0)
+                        except Exception as e:
+                            logger.warning(f"Skipping corrupted order for client {client_name}: {e}")
+                            continue
+                except FirebaseError as e:
+                    logger.warning(f"Error getting orders for client {client_name}: {e}")
+                
+                total_paid = 0
+                try:
+                    payments = list(client_ref.collection('payments').stream())
+                    for payment_doc in payments:
+                        try:
+                            payment_data = payment_doc.to_dict()
+                            if payment_data:
+                                total_paid += payment_data.get('amount', 0)
+                        except Exception as e:
+                            logger.warning(f"Skipping corrupted payment for client {client_name}: {e}")
+                            continue
+                except FirebaseError as e:
+                    logger.warning(f"Error getting payments for client {client_name}: {e}")
+                
+                balance = total_ordered - total_paid
+                
+                if balance > 0:
+                    status = f"💳 ${balance:.2f}"
+                    total_due += balance
+                elif balance < 0:
+                    status = f"💰 ${abs(balance):.2f} credit"
+                else:
+                    status = "✅ Paid"
+                
+                message += f"**{md(client_name)}** (ID: {actual_client_id})\n{status}\n\n"
+                processed_clients += 1
                 
             except Exception as e:
                 logger.warning(f"Error processing client data: {e}")
                 continue
         
         if processed_clients == 0:
-            update.message.reply_text("No valid client data found.")
+            update.message.reply_text("No valid client data found.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
         message += f"**Total Amount Due: ${total_due:.2f}**\n\n"
         message += "Use `/balance <user_id>` or `/summary <user_id>` for details"
         
-        # Split long messages
         if len(message) > 4000:
             message = message[:4000] + "\n... (truncated)"
         
-        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
         
     except Exception as e:
         logger.error(f"Error getting clients list: {e}")
-        update.message.reply_text("Error retrieving clients list. Please try again later.")
+        update.message.reply_text("Error retrieving clients list. Please try again later.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def received_command(update: Update, context: CallbackContext) -> None:
     """CM confirms receipt of payment."""
     user_id = update.message.from_user.id
     
     if not is_cm(user_id):
-        update.message.reply_text("Only the cafeteria manager can confirm payments.")
+        update.message.reply_text("Only the cafeteria manager can confirm payments.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
-        # Get pending payments without order_by to avoid index requirement
         pending_payments_query = get_pending_payments_ref().where('status', '==', 'pending_confirmation')
         pending_payments = list(pending_payments_query.limit(10).stream())
         
-        # Sort in Python instead of Firestore
         pending_list = []
         for doc in pending_payments:
             try:
@@ -636,14 +568,12 @@ def received_command(update: Update, context: CallbackContext) -> None:
                 logger.warning(f"Skipping corrupted pending payment: {e}")
                 continue
         
-        # Sort by timestamp
         pending_list.sort(key=lambda x: x[1].get('timestamp', datetime.min))
         
         if not pending_list:
-            update.message.reply_text("No pending payments to confirm.")
+            update.message.reply_text("No pending payments to confirm.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
-        # Show pending payments for confirmation
         if not context.args:
             message = "💰 **PENDING PAYMENTS** 💰\n\n"
             for i, (doc, payment) in enumerate(pending_list, 1):
@@ -652,43 +582,44 @@ def received_command(update: Update, context: CallbackContext) -> None:
             message += f"\nUse `/received <number>` to confirm a payment\n"
             message += f"Example: `/received 1` to confirm the first payment"
             
-            update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+            update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
             return
         
-        # Confirm specific payment
         payment_index = int(context.args[0]) - 1
         
         if payment_index < 0 or payment_index >= len(pending_list):
-            update.message.reply_text(f"Invalid payment number. Use /received to see pending payments.")
+            update.message.reply_text(f"Invalid payment number. Use /received to see pending payments.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
         payment_doc, payment_data = pending_list[payment_index]
         
-        # Move to confirmed payments
         client_ref = get_client_ref(payment_data['user_id'])
-        client_ref.collection('payments').add({
-            'amount': payment_data['amount'],
-            'user_id': payment_data['user_id'],
-            'user_name': payment_data['user_name'],
-            'confirmed_by_cm': True,
-            'timestamp': firestore.SERVER_TIMESTAMP,
-            'original_timestamp': payment_data['timestamp']
-        })
-        
-        # Remove from pending
-        payment_doc.reference.delete()
+        try:
+            client_ref.collection('payments').add({
+                'amount': payment_data['amount'],
+                'user_id': payment_data['user_id'],
+                'user_name': payment_data['user_name'],
+                'confirmed_by_cm': True,
+                'timestamp': firestore.SERVER_TIMESTAMP,
+                'original_timestamp': payment_data['timestamp']
+            })
+            payment_doc.reference.delete()
+        except FirebaseError as e:
+            logger.error(f"Firestore error confirming payment: {e}")
+            update.message.reply_text("Error confirming payment. Please try again later.", parse_mode=ParseMode.MARKDOWN_V2)
+            return
         
         update.message.reply_text(
             f"✅ Payment confirmed!\n\n"
-            f"**${payment_data['amount']:.2f}** from **{payment_data['user_name']}**"
+            f"**${payment_data['amount']:.2f}** from **{md(payment_data['user_name'])}**",
+            parse_mode=ParseMode.MARKDOWN_V2
         )
         
-        # Notify client
         try:
             context.bot.send_message(
                 chat_id=payment_data['user_id'],
                 text=f"✅ Your payment of ${payment_data['amount']:.2f} has been confirmed! 🎉",
-                parse_mode=ParseMode.MARKDOWN
+                parse_mode=ParseMode.MARKDOWN_V2
             )
         except Exception as e:
             logger.error(f"Failed to notify client about confirmed payment: {e}")
@@ -696,24 +627,24 @@ def received_command(update: Update, context: CallbackContext) -> None:
         logger.info(f"CM confirmed payment: ${payment_data['amount']:.2f} from {payment_data['user_name']}")
         
     except (ValueError, IndexError):
-        update.message.reply_text("Usage: /received <payment_number>\nUse /received to see pending payments.")
+        update.message.reply_text("Usage: /received <payment_number>\nUse /received to see pending payments.", parse_mode=ParseMode.MARKDOWN_V2)
     except Exception as e:
         logger.error(f"Error processing received command: {e}")
-        update.message.reply_text("Sorry, there was an error confirming the payment. Please try again.")
+        update.message.reply_text("Sorry, there was an error confirming the payment. Please try again.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def sales_command(update: Update, context: CallbackContext) -> None:
     """CM views sales summary."""
     user_id = update.message.from_user.id
     
     if not is_cm(user_id):
-        update.message.reply_text("Only the cafeteria manager can view sales summary.")
+        update.message.reply_text("Only the cafeteria manager can view sales summary.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
         clients = list(db.collection('cafeteria_clients').stream())
         
         if not clients:
-            update.message.reply_text("No sales data available.")
+            update.message.reply_text("No sales data available.", parse_mode=ParseMode.MARKDOWN_V2)
             return
         
         message = "💰 **SALES SUMMARY** 💰\n\n"
@@ -728,34 +659,41 @@ def sales_command(update: Update, context: CallbackContext) -> None:
             client_id = client_data.get('user_id')
             client_ref = get_client_ref(client_id)
             
-            # Get orders
-            orders = list(client_ref.collection('orders').stream())
-            for order_doc in orders:
-                order = order_doc.to_dict()
-                order_total = order.get('total_price', 0)
-                total_ordered += order_total
-                
-                # Track item sales
-                item_name = order.get('item_name', 'Unknown')
-                quantity = order.get('quantity', 0)
-                if item_name in item_sales:
-                    item_sales[item_name] += quantity
-                else:
-                    item_sales[item_name] = quantity
+            try:
+                orders = list(client_ref.collection('orders').stream())
+                for order_doc in orders:
+                    order = order_doc.to_dict()
+                    order_total = order.get('total_price', 0)
+                    total_ordered += order_total
+                    
+                    item_name = order.get('item_name', 'Unknown')
+                    quantity = order.get('quantity', 0)
+                    if item_name in item_sales:
+                        item_sales[item_name] += quantity
+                    else:
+                        item_sales[item_name] = quantity
+            except FirebaseError as e:
+                logger.warning(f"Error getting orders for client {client_id}: {e}")
+                continue
             
-            # Get payments
-            payments = list(client_ref.collection('payments').stream())
-            for payment_doc in payments:
-                payment = payment_doc.to_dict()
-                total_paid += payment.get('amount', 0)
+            try:
+                payments = list(client_ref.collection('payments').stream())
+                for payment_doc in payments:
+                    payment = payment_doc.to_dict()
+                    total_paid += payment.get('amount', 0)
+            except FirebaseError as e:
+                logger.warning(f"Error getting payments for client {client_id}: {e}")
+                continue
         
-        # Get pending payments
-        pending_payments = list(get_pending_payments_ref()
-                              .where('status', '==', 'pending_confirmation')
-                              .stream())
-        for pending_doc in pending_payments:
-            pending = pending_doc.to_dict()
-            total_pending += pending.get('amount', 0)
+        try:
+            pending_payments = list(get_pending_payments_ref()
+                                  .where('status', '==', 'pending_confirmation')
+                                  .stream())
+            for pending_doc in pending_payments:
+                pending = pending_doc.to_dict()
+                total_pending += pending.get('amount', 0)
+        except FirebaseError as e:
+            logger.warning(f"Error getting pending payments: {e}")
         
         balance_due = total_ordered - total_paid
         
@@ -772,11 +710,11 @@ def sales_command(update: Update, context: CallbackContext) -> None:
         if len(message) > 4000:
             message = message[:4000] + "\n... (truncated)"
         
-        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
         
     except Exception as e:
         logger.error(f"Error getting sales summary: {e}")
-        update.message.reply_text("Error retrieving sales summary.")
+        update.message.reply_text("Error retrieving sales summary.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def balance_command(update: Update, context: CallbackContext) -> None:
     """Shows balance for user or specified client (CM only)."""
@@ -786,31 +724,27 @@ def balance_command(update: Update, context: CallbackContext) -> None:
     target_user_id = user_id
     target_user_name = user_name
     
-    # If CM wants to check someone else's balance
     if is_cm(user_id) and context.args:
         try:
             target_user_id = int(context.args[0])
-            # Get user name from their data
             client_doc = get_client_ref(target_user_id).get()
             if client_doc.exists:
                 target_user_name = client_doc.to_dict().get('user_name', f'User {target_user_id}')
             else:
                 target_user_name = f'User {target_user_id}'
         except ValueError:
-            update.message.reply_text("Usage: /balance <user_id>\nExample: /balance 12345")
+            update.message.reply_text("Usage: /balance <user_id>\nExample: /balance 12345", parse_mode=ParseMode.MARKDOWN_V2)
             return
     elif not is_cm(user_id) and context.args:
-        update.message.reply_text("You can only check your own balance. Use /balance without arguments.")
+        update.message.reply_text("You can only check your own balance. Use /balance without arguments.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
         client_ref = get_client_ref(target_user_id)
         
-        # Calculate total orders
         orders = client_ref.collection('orders').stream()
         total_ordered = sum(order.to_dict().get('total_price', 0) for order in orders)
         
-        # Calculate total payments
         payments = client_ref.collection('payments').stream()
         total_paid = sum(payment.to_dict().get('amount', 0) for payment in payments)
         
@@ -831,11 +765,11 @@ def balance_command(update: Update, context: CallbackContext) -> None:
         message += f"Total Paid: ${total_paid:.2f}\n"
         message += f"**{status_text}: ${abs(balance):.2f}**"
         
-        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
         
-    except Exception as e:
+    except FirebaseError as e:
         logger.error(f"Error calculating balance for {target_user_name}: {e}")
-        update.message.reply_text(f"Could not retrieve balance for {target_user_name}.")
+        update.message.reply_text(f"Could not retrieve balance for {md(target_user_name)}.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def summary_command(update: Update, context: CallbackContext) -> None:
     """Shows order and payment summary."""
@@ -845,7 +779,6 @@ def summary_command(update: Update, context: CallbackContext) -> None:
     target_user_id = user_id
     target_user_name = user_name
     
-    # If CM wants to check someone else's summary
     if is_cm(user_id) and context.args:
         try:
             target_user_id = int(context.args[0])
@@ -855,10 +788,10 @@ def summary_command(update: Update, context: CallbackContext) -> None:
             else:
                 target_user_name = f'User {target_user_id}'
         except ValueError:
-            update.message.reply_text("Usage: /summary <user_id>\nExample: /summary 12345")
+            update.message.reply_text("Usage: /summary <user_id>\nExample: /summary 12345", parse_mode=ParseMode.MARKDOWN_V2)
             return
     elif not is_cm(user_id) and context.args:
-        update.message.reply_text("You can only check your own summary. Use /summary without arguments.")
+        update.message.reply_text("You can only check your own summary. Use /summary without arguments.", parse_mode=ParseMode.MARKDOWN_V2)
         return
     
     try:
@@ -866,7 +799,6 @@ def summary_command(update: Update, context: CallbackContext) -> None:
         
         message = f"📊 **SUMMARY - {md(target_user_name)}** 📊\n\n"
         
-        # Recent Orders
         message += "🍽️ **RECENT ORDERS**\n"
         orders = list(client_ref.collection('orders')
                      .order_by('timestamp', direction=firestore.Query.DESCENDING)
@@ -885,7 +817,6 @@ def summary_command(update: Update, context: CallbackContext) -> None:
         
         message += f"\n**Total Ordered: ${total_ordered:.2f}**\n\n"
         
-        # Recent Payments
         message += "💰 **RECENT PAYMENTS**\n"
         payments = list(client_ref.collection('payments')
                        .order_by('timestamp', direction=firestore.Query.DESCENDING)
@@ -904,7 +835,6 @@ def summary_command(update: Update, context: CallbackContext) -> None:
         
         message += f"\n**Total Paid: ${total_paid:.2f}**\n\n"
         
-        # Balance
         balance = total_ordered - total_paid
         if balance > 0:
             message += f"💳 **Amount Due: ${balance:.2f}**"
@@ -913,15 +843,14 @@ def summary_command(update: Update, context: CallbackContext) -> None:
         else:
             message += f"✅ **All Paid Up!**"
         
-        # Split long messages
         if len(message) > 4000:
             message = message[:4000] + "\n... (truncated)"
         
-        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
         
-    except Exception as e:
+    except FirebaseError as e:
         logger.error(f"Error generating summary for {target_user_name}: {e}")
-        update.message.reply_text(f"Could not retrieve summary for {target_user_name}.")
+        update.message.reply_text(f"Could not retrieve summary for {md(target_user_name)}.", parse_mode=ParseMode.MARKDOWN_V2)
 
 def help_command(update: Update, context: CallbackContext) -> None:
     """Shows help information."""
@@ -957,71 +886,61 @@ def help_command(update: Update, context: CallbackContext) -> None:
             "💰 **Example:** /paid 15.50"
         )
     
-    update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN_V2)
 
 def error_handler(update: object, context: CallbackContext) -> None:
     """Log Errors caused by Updates."""
     logger.warning('Update "%s" caused error "%s"', update, context.error)
+    if isinstance(context.error, BadRequest):
+        message = "Invalid request sent to Telegram. Please check your input."
+    elif isinstance(context.error, Unauthorized):
+        message = "Bot lacks permission to perform this action."
+    else:
+        message = "An unexpected error occurred. Please try again later."
     if update and hasattr(update, 'message') and update.message:
-        update.message.reply_text("An unexpected error occurred. Please try again later.")
+        update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
-def main() -> None:
-    """Start the bot."""
-    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == 'YOUR_TELEGRAM_BOT_TOKEN':
-        print("Bot token is not set properly. Please check TELEGRAM_BOT_TOKEN.")
-        return
-    
-    if CM_USER_ID == 0:
-        print("CM User ID is not set properly. Please check CM_USER_ID.")
-        return
-    
-    # Create the Updater and pass it your bot's token
-    updater = Updater(TELEGRAM_BOT_TOKEN)
-    
-   
-    
-    # Start the Bot
-    # updater.start_polling()
-    #logger.info("Personal Cafeteria Bot started...")
-    # print(f"Bot is running! CM User ID: {CM_USER_ID}")
-    
-    # Run the bot until you press Ctrl-C
-    #updater.idle()
-
-
-
-# ---------- Flask / Railway ----------
+# ---------- Flask App ----------
 app = Flask(__name__)
-
 updater = Updater(TELEGRAM_BOT_TOKEN)
- # Get the dispatcher to register handlers
-    dispatcher = updater.dispatcher
-    
-    # Command handlers
-    dispatcher.add_handler(CommandHandler("start", start_command))
-    dispatcher.add_handler(CommandHandler("menu", menu_command))
-    dispatcher.add_handler(CommandHandler("order", order_command))
-    dispatcher.add_handler(CommandHandler("paid", paid_command))
-    dispatcher.add_handler(CommandHandler("received", received_command))
-    dispatcher.add_handler(CommandHandler("pending", pending_command))
-    dispatcher.add_handler(CommandHandler("clients", clients_command))
-    dispatcher.add_handler(CommandHandler("orders", orders_command))
-    dispatcher.add_handler(CommandHandler("sales", sales_command))
-    dispatcher.add_handler(CommandHandler("test", test_notification_command))
-    dispatcher.add_handler(CommandHandler("balance", balance_command))
-    dispatcher.add_handler(CommandHandler("summary", summary_command))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    
-    # Error handler
-    dispatcher.add_error_handler(error_handler)
+dispatcher = updater.dispatcher
 
+# Register handlers
+dispatcher.add_handler(CommandHandler("start", start_command))
+dispatcher.add_handler(CommandHandler("menu", menu_command))
+dispatcher.add_handler(CommandHandler("order", order_command))
+dispatcher.add_handler(CommandHandler("paid", paid_command))
+dispatcher.add_handler(CommandHandler("received", received_command))
+dispatcher.add_handler(CommandHandler("pending", pending_command))
+dispatcher.add_handler(CommandHandler("clients", clients_command))
+dispatcher.add_handler(CommandHandler("orders", orders_command))
+dispatcher.add_handler(CommandHandler("sales", sales_command))
+dispatcher.add_handler(CommandHandler("balance", balance_command))
+dispatcher.add_handler(CommandHandler("summary", summary_command))
+dispatcher.add_handler(CommandHandler("help", help_command))
+dispatcher.add_handler(CommandHandler("test_notification", test_notification_command))
+dispatcher.add_error_handler(error_handler)
 
 @app.route("/", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), updater.bot)
-    dispatcher.process_update(update)
-    return "", 200
+    try:
+        update = Update.de_json(request.get_json(force=True), updater.bot)
+        dispatcher.process_update(update)
+        return "", 200
+    except Exception as e:
+        logger.error(f"Webhook processing failed: {e}")
+        return "", 500
+
+def main() -> None:
+    """Start the bot."""
+    try:
+        updater.bot.set_webhook(f"{RAILWAY_URL}/")
+        logger.info(f"Webhook set to {RAILWAY_URL}/")
+    except TelegramError as e:
+        logger.error(f"Failed to set webhook: {e}")
+        raise
+    
+    app.run(host="0.0.0.0", port=PORT)
 
 if __name__ == "__main__":
-    updater.bot.set_webhook(f"{os.getenv('RAILWAY_URL')}/")
-    app.run(host="0.0.0.0", port=PORT)
+    main()

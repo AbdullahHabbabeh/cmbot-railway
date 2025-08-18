@@ -1010,13 +1010,13 @@ async def webhook():
 if __name__ == "__main__":
     railway_url = os.getenv('RAILWAY_URL')
     if railway_url:
-     try:
+    try:
         asyncio.run(application.bot.set_webhook(f"{railway_url}/"))
 #------------------------------------------------------------------------------
         logger.info(f"Webhook set to: {railway_url}/")
         except Exception as e:
             logger.error(f"Failed to set webhook: {e}")
-   else:
+    else:
         logger.warning("RAILWAY_URL not set - webhook not configured")
     
-   app.run(host="0.0.0.0", port=PORT)
+    app.run(host="0.0.0.0", port=PORT)

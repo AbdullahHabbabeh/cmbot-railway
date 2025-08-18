@@ -40,7 +40,7 @@ def main():
     updater = setup_bot()
     
     # Get the PORT environment variable set by Railway
-    port = int(os.environ.get('PORT', 8443))
+    port = int(os.environ.get('PORT', 8080))
     
     # Construct webhook URL (Railway provides a public URL)
     webhook_url = f"https://{os.environ.get('RAILWAY_PUBLIC_DOMAIN')}/webhook"

@@ -3,7 +3,8 @@ import json
 import logging
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, CallbackContext
+####from telegram.ext import Updater, CommandHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, ContextTypes
 from telegram.constants import ParseMode
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -967,22 +968,23 @@ def main():
     
     try:
         # Create the Updater and pass it your bot's token
-        updater = Updater(TOKEN)
-        dispatcher = updater.dispatcher
+         application = Application.builder().token(TOKEN).build()
+         ##   updater = Updater(TOKEN)
+         ##  dispatcher = updater.dispatcher
         
         # Register handlers
-        dispatcher.add_handler(CommandHandler("start", start_command))
-        dispatcher.add_handler(CommandHandler("menu", menu_command))
-        dispatcher.add_handler(CommandHandler("order", order_command))
-        dispatcher.add_handler(CommandHandler("paid", paid_command))
-        dispatcher.add_handler(CommandHandler("received", received_command))
-        dispatcher.add_handler(CommandHandler("pending", pending_command))
-        dispatcher.add_handler(CommandHandler("clients", clients_command))
-        dispatcher.add_handler(CommandHandler("orders", orders_command))
-        dispatcher.add_handler(CommandHandler("sales", sales_command))
-        dispatcher.add_handler(CommandHandler("balance", balance_command))
-        dispatcher.add_handler(CommandHandler("summary", summary_command))
-        dispatcher.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("menu", menu_command))
+        application.add_handler(CommandHandler("order", order_command))
+        application.add_handler(CommandHandler("paid", paid_command))
+        application.add_handler(CommandHandler("received", received_command))
+        application.add_handler(CommandHandler("pending", pending_command))
+        application.add_handler(CommandHandler("clients", clients_command))
+        application.add_handler(CommandHandler("orders", orders_command))
+        application.add_handler(CommandHandler("sales", sales_command))
+        application.add_handler(CommandHandler("balance", balance_command))
+        application.add_handler(CommandHandler("summary", summary_command))
+        application.add_handler(CommandHandler("help", help_command))
         
         # Add error handler
         dispatcher.add_error_handler(error_handler)
@@ -994,60 +996,27 @@ def main():
         raise
 
 # ---------- Flask App ----------
+#----------------------------------------------------------------
 app = Flask(__name__)
-
-# Initialize the bot when the module is imported
-try:
-    updater = Updater(TOKEN)
-    dispatcher = updater.dispatcher
-    
-    # Register handlers
-    dispatcher.add_handler(CommandHandler("start", start_command))
-    dispatcher.add_handler(CommandHandler("menu", menu_command))
-    dispatcher.add_handler(CommandHandler("order", order_command))
-    dispatcher.add_handler(CommandHandler("paid", paid_command))
-    dispatcher.add_handler(CommandHandler("received", received_command))
-    dispatcher.add_handler(CommandHandler("pending", pending_command))
-    dispatcher.add_handler(CommandHandler("clients", clients_command))
-    dispatcher.add_handler(CommandHandler("orders", orders_command))
-    dispatcher.add_handler(CommandHandler("sales", sales_command))
-    dispatcher.add_handler(CommandHandler("balance", balance_command))
-    dispatcher.add_handler(CommandHandler("summary", summary_command))
-    dispatcher.add_handler(CommandHandler("help", help_command))
-    
-    # Add error handler
-    dispatcher.add_error_handler(error_handler)
-    
-    logger.info("Bot initialized successfully")
-    
-except Exception as e:
-    logger.error(f"Failed to initialize bot: {e}")
-    # Don't raise here to allow Flask to start even if bot fails
+application = Application.builder().token(TOKEN).build()
+application.add_handler(CommandHandler("start", start_command))
 
 @app.route("/", methods=["POST"])
-def webhook():
-    try:
-        update = Update.de_json(request.get_json(force=True), updater.bot)
-        dispatcher.process_update(update)
-        return "", 200
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        return "", 500
-
-@app.route("/health", methods=["GET"])
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}, 200
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), application.bot)
+    await application.process_update(update)
+    return "", 200
 
 if __name__ == "__main__":
-    # Set webhook if RAILWAY_URL is provided
     railway_url = os.getenv('RAILWAY_URL')
     if railway_url:
-        try:
-            updater.bot.set_webhook(f"{railway_url}/")
-            logger.info(f"Webhook set to: {railway_url}/")
+     try:
+        asyncio.run(application.bot.set_webhook(f"{railway_url}/"))
+#------------------------------------------------------------------------------
+        logger.info(f"Webhook set to: {railway_url}/")
         except Exception as e:
             logger.error(f"Failed to set webhook: {e}")
-    else:
+   else:
         logger.warning("RAILWAY_URL not set - webhook not configured")
     
-    app.run(host="0.0.0.0", port=PORT)
+   app.run(host="0.0.0.0", port=PORT)

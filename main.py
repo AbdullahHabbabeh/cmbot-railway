@@ -968,9 +968,9 @@ def main():
     
     try:
         # Create the Updater and pass it your bot's token
-         application = Application.builder().token(TOKEN).build()
-         ##   updater = Updater(TOKEN)
-         ##  dispatcher = updater.dispatcher
+        application = Application.builder().token(TOKEN).build()
+        ##   updater = Updater(TOKEN)
+        ##  dispatcher = updater.dispatcher
         
         # Register handlers
         application.add_handler(CommandHandler("start", start_command))
@@ -1003,20 +1003,23 @@ application.add_handler(CommandHandler("start", start_command))
 
 @app.route("/", methods=["POST"])
 async def webhook():
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
-    return "", 200
+    try:
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        await application.process_update(update)
+        return "", 200
+    except Exception as e:
+        logger.exception(f"Webhook error: {e}")
+        return "", 500
 
 if __name__ == "__main__":
     railway_url = os.getenv('RAILWAY_URL')
     if railway_url:
-    try:
-        asyncio.run(application.bot.set_webhook(f"{railway_url}/"))
+        try:
+            asyncio.run(application.bot.set_webhook(f"{railway_url}/"))
 #------------------------------------------------------------------------------
-        logger.info(f"Webhook set to: {railway_url}/")
+            logger.info(f"Webhook set to: {railway_url}/")
         except Exception as e:
             logger.error(f"Failed to set webhook: {e}")
     else:
-        logger.warning("RAILWAY_URL not set - webhook not configured")
-    
+        logger.warning("RAILWAY_URL not set - webhook not configured") 
     app.run(host="0.0.0.0", port=PORT)

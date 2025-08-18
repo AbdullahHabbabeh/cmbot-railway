@@ -3,7 +3,7 @@ import json
 import logging
 from flask import Flask, request
 from telegram import Update, ParseMode
-from telegram.ext import Updater, CommandHandler, Dispatcher, CallbackContext
+from telegram.ext import Application, CommandHandler, Dispatcher, CallbackContext
 from telegram.utils.helpers import escape_markdown
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -902,30 +902,29 @@ def error_handler(update: object, context: CallbackContext) -> None:
 
 # ---------- Flask App ----------
 app = Flask(__name__)
-updater = Updater(TELEGRAM_BOT_TOKEN)
-dispatcher = updater.dispatcher
+updater = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 # Register handlers
-dispatcher.add_handler(CommandHandler("start", start_command))
-dispatcher.add_handler(CommandHandler("menu", menu_command))
-dispatcher.add_handler(CommandHandler("order", order_command))
-dispatcher.add_handler(CommandHandler("paid", paid_command))
-dispatcher.add_handler(CommandHandler("received", received_command))
-dispatcher.add_handler(CommandHandler("pending", pending_command))
-dispatcher.add_handler(CommandHandler("clients", clients_command))
-dispatcher.add_handler(CommandHandler("orders", orders_command))
-dispatcher.add_handler(CommandHandler("sales", sales_command))
-dispatcher.add_handler(CommandHandler("balance", balance_command))
-dispatcher.add_handler(CommandHandler("summary", summary_command))
-dispatcher.add_handler(CommandHandler("help", help_command))
-dispatcher.add_handler(CommandHandler("test_notification", test_notification_command))
-dispatcher.add_error_handler(error_handler)
+updater.add_handler(CommandHandler("start", start_command))
+updater.add_handler(CommandHandler("menu", menu_command))
+updater.add_handler(CommandHandler("order", order_command))
+updater.add_handler(CommandHandler("paid", paid_command))
+updater.add_handler(CommandHandler("received", received_command))
+updater.add_handler(CommandHandler("pending", pending_command))
+updater.add_handler(CommandHandler("clients", clients_command))
+updater.add_handler(CommandHandler("orders", orders_command))
+updater.add_handler(CommandHandler("sales", sales_command))
+updater.add_handler(CommandHandler("balance", balance_command))
+updater.add_handler(CommandHandler("summary", summary_command))
+updater.add_handler(CommandHandler("help", help_command))
+updater.add_handler(CommandHandler("test_notification", test_notification_command))
+updater.add_error_handler(error_handler)
 
 @app.route("/", methods=["POST"])
 def webhook():
     try:
         update = Update.de_json(request.get_json(force=True), updater.bot)
-        dispatcher.process_update(update)
+        updater.dispatcher.process_update(update)
         return "", 200
     except Exception as e:
         logger.error(f"Webhook processing failed: {e}")

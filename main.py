@@ -2,7 +2,8 @@ import os
 import logging
 from telegram import Update
 from telegram.ext import Updater, Dispatcher
-from coreCMfunc04 import initialize_firebase, get_handlers, error_handler, TELEGRAM_BOT_TOKEN, CM_USER_ID
+from coreCMfunc05 import get_handlers, error_handler, TELEGRAM_BOT_TOKEN, CM_USER_ID
+
 from flask import Flask, request
 
 # Enable logging

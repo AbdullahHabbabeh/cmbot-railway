@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Initialize Firebase and bot at module level
-initialize_firebase()
+
 
 # Global variable to store the updater
 updater = None
